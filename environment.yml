@@ -60,7 +60,7 @@ dependencies:
     - sentencepiece==0.1.99
 
     # CLUE benchmark
-    - clueai==0.0.4
+    - clueai==0.0.2.2.6
 
     # Wikipedia processing
     - mwparserfromhell==0.6.5
