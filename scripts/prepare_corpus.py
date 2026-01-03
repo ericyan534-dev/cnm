@@ -64,91 +64,110 @@ def clean_text(text: str) -> str:
 
 def extract_wiki_articles(dump_path: Path) -> Iterator[dict]:
     """
-    Extract articles from Wikipedia XML dump.
+    Extract articles from Wikipedia XML dump (namespace-agnostic).
 
-    Args:
-        dump_path: Path to zhwiki-*-pages-articles.xml.bz2
-
-    Yields:
-        Dict with 'title' and 'text' fields
+    Fixes:
+      - Handles MediaWiki export namespace changes (e.g., export-0.11 vs export-0.10)
+      - Uses correct <revision><text> path
+      - Avoids silently yielding 0 by adding light progress logs
     """
     if not HAS_MWPARSER:
-        raise ImportError("mwparserfromhell required for Wikipedia processing. "
-                         "Install with: pip install mwparserfromhell")
+        raise ImportError(
+            "mwparserfromhell required for Wikipedia processing. "
+            "Install with: pip install mwparserfromhell"
+        )
 
     import xml.etree.ElementTree as ET
 
-    # Namespace for Wikipedia XML
-    ns = {'mw': 'http://www.mediawiki.org/xml/export-0.10/'}
-
     print(f"Processing Wikipedia dump: {dump_path}")
 
-    opener = bz2.open if str(dump_path).endswith('.bz2') else open
+    opener = bz2.open if str(dump_path).endswith(".bz2") else open
 
-    with opener(dump_path, 'rt', encoding='utf-8') as f:
-        # Iterative parsing for large files
-        context = ET.iterparse(f, events=('end',))
+    page_count = 0
+    yield_count = 0
+
+    # Open as binary: lets the XML parser handle encoding properly and is faster/safer.
+    with opener(dump_path, "rb") as f:
+        context = ET.iterparse(f, events=("end",))
 
         for event, elem in context:
-            if elem.tag.endswith('page'):
-                # Extract title and text
-                title_elem = elem.find('.//mw:title', ns) or elem.find('title')
-                text_elem = elem.find('.//mw:text', ns) or elem.find('.//text')
+            # Tag names are namespaced like {uri}page, so endswith('page') is fine.
+            if elem.tag.endswith("page"):
+                page_count += 1
+                if page_count % 100000 == 0:
+                    print(f"Seen {page_count} pages, yielded {yield_count} articles so far...")
 
-                if title_elem is not None and text_elem is not None:
-                    title = title_elem.text or ''
-                    wikitext = text_elem.text or ''
+                # Namespace-agnostic element lookup:
+                # - title is directly under <page>
+                # - text is under <revision><text>
+                title_elem = elem.find("./{*}title")
+                text_elem = elem.find(".//{*}revision/{*}text")
 
-                    # Skip redirects, disambiguation, etc.
-                    if wikitext.lower().startswith('#redirect'):
-                        elem.clear()
-                        continue
+                if title_elem is None or text_elem is None:
+                    elem.clear()
+                    continue
 
-                    # Parse wikitext
-                    try:
-                        parsed = mwparserfromhell.parse(wikitext)
-                        text = parsed.strip_code()
-                        text = clean_text(text)
+                title = title_elem.text or ""
+                wikitext = text_elem.text or ""
 
-                        if len(text) > 100:  # Skip very short articles
-                            yield {'title': title, 'text': text}
-                    except Exception:
-                        pass
+                # Skip redirects
+                if wikitext.lstrip().lower().startswith("#redirect"):
+                    elem.clear()
+                    continue
 
-                # Clear element to save memory
-                elem.clear()
+                try:
+                    parsed = mwparserfromhell.parse(wikitext)
+                    text = parsed.strip_code()
+                    text = clean_text(text)
+
+                    if len(text) > 100:
+                        yield_count += 1
+                        yield {"title": title, "text": text}
+                except Exception:
+                    # Keep going; wiki markup can be messy
+                    pass
+                finally:
+                    elem.clear()
+
+    print(f"Finished parsing. Pages seen: {page_count}, articles yielded: {yield_count}")
 
 
-def load_clue_corpus(split: str = 'train') -> Iterator[dict]:
+
+def load_clue_corpus(split: str = "train") -> Iterator[dict]:
     """
-    Load CLUECorpus2020 from HuggingFace.
+    Load a large Chinese corpus via HuggingFace datasets.
 
-    Args:
-        split: Dataset split ('train')
+    Fixes:
+      - Removes incorrect fallback to c4/zh (config doesn't exist)
+      - Removes broken fallback to wikipedia/20220301.zh that 404s on Wikimedia dumps
+      - Uses a reliable HF-hosted Chinese Wikipedia snapshot instead
+      - Adds trust_remote_code=True to silence FutureWarning and future-proof
 
-    Yields:
-        Dict with 'text' field
+    Note:
+      - CLUECorpus2020 is officially distributed via the CLUE GitHub repo, not as an
+        official 'clue' Hub dataset in a way this script can reliably stream.
+      - So we use HF-hosted Wikipedia as a stable substitute unless you supply your own CLUE files.
     """
     if not HAS_DATASETS:
         raise ImportError("datasets library required. Install with: pip install datasets")
 
-    print(f"Loading CLUECorpus2020 ({split} split)...")
+    print(f"Loading Chinese corpus ({split} split)...")
 
-    try:
-        dataset = load_dataset('clue', 'clue_corpus_small', split=split, streaming=True)
-    except Exception:
-        # Fallback to direct loading
-        try:
-            dataset = load_dataset('c4', 'zh', split=split, streaming=True)
-        except Exception as e:
-            print(f"Warning: Could not load CLUE corpus: {e}")
-            print("Trying alternative Chinese corpus...")
-            dataset = load_dataset('wikipedia', '20220301.zh', split='train', streaming=True)
+    # Reliable HF dataset: wikimedia/wikipedia snapshot for Chinese.
+    # '20231101.zh' is known to exist on the Hub. (You can swap to a newer snapshot if desired.)
+    dataset = load_dataset(
+        "wikimedia/wikipedia",
+        "20231101.zh",
+        split="train",
+        streaming=True,
+        trust_remote_code=True,
+    )
 
     for item in dataset:
-        text = item.get('text', '')
+        text = item.get("text", "")
         if text and len(text) > 50:
-            yield {'text': clean_text(text)}
+            yield {"text": clean_text(text)}
+
 
 
 def load_text_files(directory: Path) -> Iterator[dict]:
