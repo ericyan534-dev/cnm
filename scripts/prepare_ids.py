@@ -356,12 +356,6 @@ def main():
     # Parse all characters
     print("\nParsing characters...")
     parser_instance.parse_all(target_chars)
-    for ch in ["你", "好", "我", "中", "国"]:
-    try:
-        tree = parser_instance.parse(ch) if hasattr(parser_instance, "parse") else None
-        print(f"[DEBUG] {ch} parsed tree:", tree)
-    except Exception as e:
-        print(f"[DEBUG] {ch} parse error:", e)
     print(f"Parsed {parser_instance.num_cached} characters")
 
     # Compute coverage
