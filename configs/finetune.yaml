@@ -1,0 +1,76 @@
+# Fine-tuning configuration for CNM-BERT on CLUE tasks
+
+defaults:
+  - model/base
+
+# Fine-tuning specific settings
+training:
+  output_dir: "./outputs/finetune"
+
+  # Short schedule for fine-tuning
+  num_train_epochs: 3
+
+  # Optimization
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+
+  # Batch sizes
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 64
+  gradient_accumulation_steps: 1
+
+  # Evaluation
+  evaluation_strategy: "epoch"
+  save_strategy: "epoch"
+  load_best_model_at_end: true
+  metric_for_best_model: "accuracy"
+  greater_is_better: true
+
+  # Early stopping
+  # early_stopping_patience: 3
+
+  # Logging
+  logging_steps: 50
+  report_to: "wandb"
+
+  # Performance
+  fp16: true
+  dataloader_num_workers: 4
+
+data:
+  max_seq_length: 512
+
+# Task-specific overrides (use with --task_name)
+tasks:
+  afqmc:
+    num_labels: 2
+    learning_rate: 2.0e-5
+    num_train_epochs: 3
+
+  tnews:
+    num_labels: 15
+    learning_rate: 2.0e-5
+    num_train_epochs: 5
+
+  iflytek:
+    num_labels: 119
+    learning_rate: 2.0e-5
+    num_train_epochs: 5
+    per_device_train_batch_size: 16
+
+  cmnli:
+    num_labels: 3
+    learning_rate: 2.0e-5
+    num_train_epochs: 3
+
+  csl:
+    num_labels: 2
+    learning_rate: 2.0e-5
+    num_train_epochs: 5
+
+  wsc:
+    num_labels: 2
+    learning_rate: 1.0e-5
+    num_train_epochs: 10
+    per_device_train_batch_size: 8

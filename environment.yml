@@ -1,0 +1,67 @@
+name: cnm
+channels:
+  - pytorch
+  - nvidia
+  - huggingface
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.10.13
+
+  # PyTorch ecosystem (CUDA 12.1)
+  - pytorch=2.2.0
+  - torchvision=0.17.0
+  - torchaudio=2.2.0
+  - pytorch-cuda=12.1
+
+  # HuggingFace
+  - transformers=4.37.2
+  - datasets=2.16.1
+  - tokenizers=0.15.1
+  - accelerate=0.26.1
+
+  # Data processing
+  - numpy=1.26.3
+  - pandas=2.1.4
+  - scipy=1.12.0
+  - scikit-learn=1.4.0
+
+  # Chinese NLP
+  - jieba=0.42.1
+
+  # Utilities
+  - tqdm=4.66.1
+  - pyyaml=6.0.1
+  - requests=2.31.0
+  - regex=2023.12.25
+
+  # Logging & experiment tracking
+  - wandb=0.16.2
+
+  # Development
+  - pytest=7.4.4
+  - pytest-cov=4.1.0
+  - black=23.12.1
+  - isort=5.13.2
+  - mypy=1.8.0
+  - ruff=0.1.11
+
+  # Jupyter (optional, for analysis)
+  - jupyterlab=4.0.10
+  - ipywidgets=8.1.1
+
+  - pip
+
+  - pip:
+    # Additional HF tools
+    - evaluate==0.4.1
+    - sentencepiece==0.1.99
+
+    # CLUE benchmark
+    - clueai==0.0.4
+
+    # Wikipedia processing
+    - mwparserfromhell==0.6.5
+    - wikitextparser==0.55.5

@@ -1,0 +1,68 @@
+# CNM-BERT Large Configuration
+# Based on BERT-large scale (1024 hidden, 24 layers, 16 heads)
+
+model:
+  # BERT architecture
+  vocab_size: 21128
+  hidden_size: 1024
+  num_hidden_layers: 24
+  num_attention_heads: 16
+  intermediate_size: 4096
+  hidden_act: "gelu"
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  max_position_embeddings: 512
+  type_vocab_size: 2
+  initializer_range: 0.02
+  layer_norm_eps: 1.0e-12
+
+  # CNM-specific
+  struct_dim: 256
+  tree_hidden_dim: 512
+  max_tree_depth: 6
+  component_vocab_size: 5000
+  operator_vocab_size: 16
+  aux_loss_weight: 0.1
+  fusion_type: "concat_project"
+  struct_dropout: 0.1
+  use_struct_embeddings: true
+
+  # Pretrained source
+  pretrained_bert: "hfl/chinese-roberta-wwm-ext-large"
+
+training:
+  # Optimization (lower LR for large model)
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+  # Batch (smaller for memory)
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 16
+
+  # Schedule
+  num_train_epochs: 3
+  max_steps: -1
+
+  # MLM
+  mlm_probability: 0.15
+  wwm: true
+
+  # Logging
+  logging_steps: 100
+  save_steps: 500
+  eval_steps: 500
+
+  # Checkpointing
+  save_total_limit: 3
+  load_best_model_at_end: true
+
+  # Memory optimization
+  fp16: true
+  gradient_checkpointing: true
+
+data:
+  max_seq_length: 512
+  preprocessing_num_workers: 4

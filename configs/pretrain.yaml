@@ -1,0 +1,53 @@
+# Pretraining configuration for CNM-BERT
+
+# Inherit from base model config
+defaults:
+  - model/base
+
+# Override for pretraining
+training:
+  output_dir: "./outputs/pretrain"
+
+  # Long training schedule
+  num_train_epochs: 10
+  max_steps: 1000000  # Or use epochs
+
+  # Optimization
+  learning_rate: 1.0e-4
+  warmup_steps: 10000
+
+  # Larger batches for pretraining
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 8
+  # Effective batch size: 32 * 8 * num_gpus
+
+  # MLM
+  mlm_probability: 0.15
+  wwm: true
+  aux_loss_weight: 0.1
+
+  # Evaluation
+  evaluation_strategy: "steps"
+  eval_steps: 5000
+
+  # Saving
+  save_strategy: "steps"
+  save_steps: 5000
+  save_total_limit: 5
+
+  # Logging
+  logging_steps: 100
+  report_to: "wandb"
+  run_name: "cnm-bert-pretrain"
+
+  # Performance
+  fp16: true
+  dataloader_num_workers: 4
+
+data:
+  train_file: "data/corpus"
+  max_seq_length: 512
+
+  # IDS data
+  ids_data_path: "data/ids/ids_parsed.json"
+  cnm_vocab_path: "data/ids/cnm_vocab.json"
