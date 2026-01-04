@@ -570,6 +570,36 @@ def main():
     # Create parser
     parser_instance = IDSParser(ids_data=ids_data, max_depth=args.max_depth)
 
+    # Sanity check: test common characters to ensure IDS parsing works
+    test_chars = ['你', '好', '中', '国', '明', '字', '女', '子']
+    print("\nSanity check - testing common characters:")
+    sanity_failures = 0
+    sanity_successes = 0
+    for test_char in test_chars:
+        if test_char in ids_data:
+            tree = parser_instance.parse(test_char)
+            if tree.is_leaf:
+                print(f"  WARNING: '{test_char}' parsed as leaf (no decomposition)")
+                sanity_failures += 1
+            else:
+                print(f"  OK: '{test_char}' -> depth={tree.depth}, operator={tree.operator}")
+                sanity_successes += 1
+        else:
+            print(f"  SKIP: '{test_char}' not in IDS data")
+
+    if sanity_failures > 0 and sanity_successes == 0:
+        print("\n" + "=" * 60)
+        print("CRITICAL ERROR: All test characters parsed as leaves!")
+        print("This indicates IDS parsing is broken.")
+        print("Please check the IDS data format and normalization.")
+        print("=" * 60)
+        sys.exit(1)
+    elif sanity_failures > sanity_successes:
+        print("\nWARNING: More failures than successes in sanity check.")
+        print("IDS parsing may not be working correctly.")
+
+    print(f"\nSanity check complete: {sanity_successes} OK, {sanity_failures} warnings\n")
+
     # Collect target characters
     target_chars: Set[str] = set()
 
@@ -607,6 +637,13 @@ def main():
     # Compute coverage
     decomposable, total, coverage = estimate_ids_coverage(parser_instance, target_chars)
     print(f"\nIDS Coverage: {decomposable}/{total} = {coverage:.1%}")
+
+    if coverage < 0.01:
+        print("\n" + "=" * 60)
+        print("CRITICAL WARNING: IDS coverage is less than 1%!")
+        print("This suggests IDS parsing is failing for most characters.")
+        print("Please check the IDS data format.")
+        print("=" * 60 + "\n")
 
     # Compute depth distribution
     depth_dist = parser_instance.compute_depth_distribution()

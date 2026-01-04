@@ -19,7 +19,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
@@ -56,6 +56,62 @@ def is_pua(char: str) -> bool:
     return any(start <= cp <= end for start, end in PUA_RANGES)
 
 
+def normalize_ids_string(ids_string: str) -> List[str]:
+    """
+    Normalize an IDS string by:
+    1. Splitting alternatives separated by '^'
+    2. Removing source annotations like $(GHTJKPV) or [GKT]
+    3. Removing curly brace markers like {1} or {1+1}
+    4. Removing non-IDC control characters like 〾 (U+303E)
+    5. Stripping whitespace
+
+    Args:
+        ids_string: Raw IDS string from data source
+
+    Returns:
+        List of cleaned IDS alternatives
+    """
+    # First split by '^' to get alternatives
+    alternatives = ids_string.split('^')
+
+    cleaned: List[str] = []
+    for alt in alternatives:
+        alt = alt.strip()
+        if not alt:
+            continue
+
+        # Remove source annotations: $(XYZ), $[XYZ], $(XYZ+ABC), etc.
+        alt = re.sub(r'\$\([^)]*\)', '', alt)
+        alt = re.sub(r'\$\[[^\]]*\]', '', alt)
+
+        # Remove square bracket annotations: [GHTJKPV], [GK], etc.
+        alt = re.sub(r'\[[A-Z0-9*+]+\]', '', alt)
+
+        # Remove curly brace markers: {1}, {2}, {1+1}, etc.
+        alt = re.sub(r'\{[^}]*\}', '', alt)
+
+        # Remove ideographic variation indicator U+303E (〾)
+        alt = alt.replace('\u303E', '')
+
+        # Remove any other known noise characters
+        # U+2FF2 and U+2FF3 are ternary IDCs, keep them
+        # But remove U+3013 (〓 GETA MARK) if present
+        alt = alt.replace('\u3013', '')
+
+        # Remove stray asterisks used as placeholders
+        alt = alt.replace('*', '')
+
+        # Strip and check if anything remains
+        alt = alt.strip()
+        if alt and len(alt) > 0:
+            # Validate: first char should be IDC or single char
+            first_char = alt[0]
+            if first_char in IDC_ALL or len(alt) == 1:
+                cleaned.append(alt)
+
+    return cleaned
+
+
 def parse_ids_line(line: str) -> Optional[tuple[str, str, List[str]]]:
     """
     Parse a single line from the IDS file.
@@ -86,17 +142,20 @@ def parse_ids_line(line: str) -> Optional[tuple[str, str, List[str]]]:
         return None
 
     # Extract all IDS sequences (may have multiple alternatives)
-    ids_sequences = []
+    # Join all IDS parts first, then normalize
+    raw_ids_parts = []
     for part in parts[2:]:
         part = part.strip()
-        # Skip empty parts and metadata (often in brackets)
-        if not part or part.startswith("[") or part.startswith("("):
-            continue
-        # Remove any trailing comments or metadata
-        if "[" in part:
-            part = part.split("[")[0].strip()
         if part:
-            ids_sequences.append(part)
+            raw_ids_parts.append(part)
+
+    # Normalize all raw parts, handling ^ separators and annotations
+    ids_sequences: List[str] = []
+    for raw_part in raw_ids_parts:
+        normalized = normalize_ids_string(raw_part)
+        for seq in normalized:
+            if seq and seq not in ids_sequences:
+                ids_sequences.append(seq)
 
     if not ids_sequences:
         return None

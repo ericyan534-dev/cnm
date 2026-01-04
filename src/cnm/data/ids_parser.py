@@ -2,10 +2,11 @@
 IDS (Ideographic Description Sequences) parser for Chinese characters.
 
 This module parses IDS strings into tree structures, handling:
-- Multiple decomposition alternatives (chooses shortest)
+- Multiple decomposition alternatives (prefers shortest non-leaf tree)
 - Circular dependencies (detects cycles, returns atomic)
 - Maximum depth limits (truncates to leaf)
 - PUA (Private Use Area) characters
+- Normalization of IDS strings with annotations
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from cnm.data.tree import IDSTree, IDC_ARITY, IDC_ALL
 
@@ -58,6 +59,87 @@ def is_cjk(char: str) -> bool:
     )
 
 
+def normalize_ids_value(value: Union[str, List[str]]) -> List[str]:
+    """
+    Normalize an IDS value that may be a string or list.
+
+    Handles cases where the data source provides:
+    - A single string with ^ separators: "^⿰女子$(GHTJKPV)"
+    - A list of strings: ["⿰女子", "⿱女子"]
+    - A string that looks like a list
+
+    Args:
+        value: Either a string or list of strings
+
+    Returns:
+        List of cleaned IDS strings
+    """
+    if isinstance(value, list):
+        # Already a list, but each element might still need cleaning
+        result = []
+        for item in value:
+            cleaned = _clean_ids_string(item)
+            result.extend(cleaned)
+        return result
+    elif isinstance(value, str):
+        # String - might be a single IDS or contain ^ separators
+        return _clean_ids_string(value)
+    else:
+        return []
+
+
+def _clean_ids_string(ids_string: str) -> List[str]:
+    """
+    Clean a single IDS string by removing annotations and splitting alternatives.
+
+    Args:
+        ids_string: Raw IDS string
+
+    Returns:
+        List of cleaned IDS alternatives
+    """
+    if not ids_string:
+        return []
+
+    # Split by '^' to get alternatives
+    alternatives = ids_string.split('^')
+
+    cleaned: List[str] = []
+    for alt in alternatives:
+        alt = alt.strip()
+        if not alt:
+            continue
+
+        # Remove source annotations: $(XYZ), $[XYZ], etc.
+        alt = re.sub(r'\$\([^)]*\)', '', alt)
+        alt = re.sub(r'\$\[[^\]]*\]', '', alt)
+
+        # Remove square bracket annotations: [GHTJKPV], [GK], etc.
+        alt = re.sub(r'\[[A-Z0-9*+]+\]', '', alt)
+
+        # Remove curly brace markers: {1}, {2}, etc.
+        alt = re.sub(r'\{[^}]*\}', '', alt)
+
+        # Remove ideographic variation indicator U+303E (〾)
+        alt = alt.replace('\u303E', '')
+
+        # Remove other noise characters
+        alt = alt.replace('\u3013', '')  # GETA MARK
+        alt = alt.replace('*', '')       # Placeholder asterisks
+
+        # Strip whitespace
+        alt = alt.strip()
+
+        if alt and len(alt) > 0:
+            # Validate: must start with IDC or be a single char
+            first_char = alt[0]
+            if first_char in IDC_ALL or len(alt) == 1:
+                if alt not in cleaned:
+                    cleaned.append(alt)
+
+    return cleaned
+
+
 @dataclass
 class ParseResult:
     """Result of parsing an IDS string."""
@@ -85,7 +167,7 @@ class IDSParser:
 
     def __init__(
         self,
-        ids_data: Optional[Dict[str, List[str]]] = None,
+        ids_data: Optional[Dict[str, Union[str, List[str]]]] = None,
         ids_path: Optional[Path] = None,
         max_depth: int = 6,
     ):
@@ -93,7 +175,7 @@ class IDSParser:
         Initialize the parser.
 
         Args:
-            ids_data: Pre-loaded dictionary of char -> IDS sequences
+            ids_data: Pre-loaded dictionary of char -> IDS sequences (str or List[str])
             ids_path: Path to JSON file with IDS data
             max_depth: Maximum tree depth before truncation (default: 6)
         """
@@ -101,13 +183,20 @@ class IDSParser:
         self._cache: Dict[str, IDSTree] = {}
         self._in_progress: Set[str] = set()  # For cycle detection
 
+        # Load raw data
+        raw_data: Dict[str, Union[str, List[str]]] = {}
         if ids_data is not None:
-            self.raw_ids = ids_data
+            raw_data = ids_data
         elif ids_path is not None:
             with open(ids_path, "r", encoding="utf-8") as f:
-                self.raw_ids = json.load(f)
-        else:
-            self.raw_ids = {}
+                raw_data = json.load(f)
+
+        # Normalize all IDS values to List[str]
+        self.raw_ids: Dict[str, List[str]] = {}
+        for char, value in raw_data.items():
+            normalized = normalize_ids_value(value)
+            if normalized:
+                self.raw_ids[char] = normalized
 
     def parse(self, char: str, current_depth: int = 0) -> IDSTree:
         """
@@ -149,18 +238,25 @@ class IDSParser:
         self._in_progress.add(char)
 
         try:
-            # Try all decompositions, select the shortest
-            best_tree: Optional[IDSTree] = None
-            best_depth = float("inf")
+            # Try all decompositions
+            # Priority: 1) non-leaf trees, 2) shortest among non-leaf
+            candidates: List[Tuple[IDSTree, int]] = []
 
             for ids_string in self.raw_ids[char]:
                 result = self._parse_ids_string(ids_string, char, current_depth)
                 if result.success and result.tree is not None:
-                    if result.depth < best_depth:
-                        best_tree = result.tree
-                        best_depth = result.depth
+                    candidates.append((result.tree, result.depth))
 
-            if best_tree is not None:
+            if candidates:
+                # Prefer non-leaf trees (depth > 0 means has children)
+                non_leaf = [(t, d) for t, d in candidates if not t.is_leaf]
+                if non_leaf:
+                    # Select shortest among non-leaf
+                    best_tree, _ = min(non_leaf, key=lambda x: x[1])
+                else:
+                    # All are leaves, just pick one
+                    best_tree = candidates[0][0]
+
                 self._cache[char] = best_tree
                 return best_tree
 
