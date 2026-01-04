@@ -235,39 +235,87 @@ def main():
         if is_main_process:
             logger.info(f"Found {len(data_files)} JSONL files")
             # ---- Debug: sniff first few lines of each file for keys (fast fail + visibility) ----
-        def sniff_jsonl_keys(paths, max_lines=5):
-            key_counter = Counter()
-            bad_json = 0
-            for p in paths:
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        for i, line in enumerate(f):
-                            if i >= max_lines:
-                                break
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                obj = json.loads(line)
-                                if isinstance(obj, dict):
-                                    key_counter[tuple(sorted(obj.keys()))] += 1
-                            except Exception:
-                                bad_json += 1
-                except Exception:
-                    bad_json += 1
-            return key_counter, bad_json
+            def sniff_jsonl_keys(paths, max_lines=5):
+                key_counter = Counter()
+                bad_json = 0
+                for p in paths:
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            for i, line in enumerate(f):
+                                if i >= max_lines:
+                                    break
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    obj = json.loads(line)
+                                    if isinstance(obj, dict):
+                                        key_counter[tuple(sorted(obj.keys()))] += 1
+                                except Exception:
+                                    bad_json += 1
+                    except Exception:
+                        bad_json += 1
+                return key_counter, bad_json
         
-        if is_main_process:
             key_counter, bad_json = sniff_jsonl_keys([str(f) for f in data_files], max_lines=3)
             logger.info(f"Schema sniff: {len(key_counter)} unique key-sets; bad_json_lines={bad_json}")
             for ks, cnt in key_counter.most_common(10):
                 logger.info(f"  keys={ks}  count={cnt}")
 
-        dataset = load_dataset(
-            'json',
-            data_files=[str(f) for f in data_files],
-            split='train',
-        )
+        # ---- Normalize to a single 'text' column (robust to title/text/content/body) ----
+        def _to_text(examples):
+            # examples is a dict of lists because batched=True
+            n = len(next(iter(examples.values())))  # batch size
+            out = []
+            for i in range(n):
+                t = None
+        
+                # Prefer existing text-like fields
+                for key in ("text", "content", "body", "article", "main_text"):
+                    if key in examples and examples[key] is not None:
+                        v = examples[key][i]
+                        if isinstance(v, str) and v.strip():
+                            t = v
+                            break
+        
+                # If we have a title, optionally prepend it
+                title = None
+                if "title" in examples and examples["title"] is not None:
+                    v = examples["title"][i]
+                    if isinstance(v, str) and v.strip():
+                        title = v
+        
+                if t is None:
+                    t = title or ""  # fallback to title only or empty
+                elif title is not None and title not in t:
+                    t = title + "\n" + t
+        
+                out.append(t)
+        
+            return {"text": out}
+
+        from datasets import concatenate_datasets
+
+        parts = []
+        for f in data_files:
+            ds_part = load_dataset(
+                'json',
+                data_files=str(f),
+                split='train',
+            )
+            ds_part = ds_part.map(
+                _to_text,
+                batched=True,
+                num_proc=args.dataloader_num_workers if local_rank == -1 else 1,
+                desc="Normalizing text fields",
+            )
+            drop_cols = [c for c in ds_part.column_names if c != "text"]
+            if drop_cols:
+                ds_part = ds_part.remove_columns(drop_cols)
+            ds_part = ds_part.filter(lambda x: isinstance(x["text"], str) and len(x["text"].strip()) > 0)
+            parts.append(ds_part)
+
+        dataset = concatenate_datasets(parts)
 
     else:
         dataset = load_dataset(
@@ -276,9 +324,6 @@ def main():
             split='train',
         )
 
-
-    if is_main_process:
-        logger.info(f"Loaded {len(dataset)} training examples")
         # ---- Normalize to a single 'text' column (robust to title/text/content/body) ----
         def _to_text(examples):
             # examples is a dict of lists because batched=True
@@ -326,10 +371,10 @@ def main():
         # Filter empty rows to avoid wasting runtime
         dataset = dataset.filter(lambda x: isinstance(x["text"], str) and len(x["text"].strip()) > 0)
         
+    if is_main_process:
+        logger.info(f"Loaded {len(dataset)} training examples")
         if is_main_process:
             logger.info(f"After normalization: {len(dataset)} usable examples; columns={dataset.column_names}")
-
-
 
     # Tokenize dataset
     def tokenize_function(examples):
