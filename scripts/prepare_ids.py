@@ -204,8 +204,9 @@ def normalize_ids_mapping(raw) -> dict[str, str]:
         s = unicodedata.normalize("NFKC", s)
         s = _IDS_WS.sub("", s)
 
-        # Some files use ASCII placeholders; keep as-is for debug but avoid empty
+        s = sanitize_ids_string(s)
         return s if s else None
+
 
     out: dict[str, str] = {}
 
@@ -231,6 +232,53 @@ def normalize_ids_mapping(raw) -> dict[str, str]:
         return out
 
     raise TypeError(f"Unsupported IDS JSON top-level type: {type(raw)}")
+import re
+import unicodedata
+
+# strips $(...) metadata and {..} annotations
+_RE_META = re.compile(r"\$\([^)]*\)")
+_RE_BRACE = re.compile(r"\{[^}]*\}")
+
+def sanitize_ids_string(raw: str) -> str:
+    """
+    Turn non-standard IDS strings like:
+      '^⿰亻尔$(GHTJKPV)^⿰亻尓$(Z)'
+    into a clean IDS string like:
+      '⿰亻尔'
+    Strategy:
+      - NFKC normalize
+      - remove $(...) and {...}
+      - split alternative parses by '^' and pick the best candidate
+      - drop remaining '^'
+      - drop ASCII junk (metadata tags)
+    """
+    if not raw:
+        return ""
+
+    s = unicodedata.normalize("NFKC", raw)
+
+    # remove obvious metadata/annotations
+    s = _RE_META.sub("", s)
+    s = _RE_BRACE.sub("", s)
+
+    # split by caret (this file uses ^ as variant separator AND also prefixes)
+    parts = [p for p in s.split("^") if p]
+
+    # choose the best candidate: prefer ones that contain IDS operators (⿰⿱... U+2FF0..U+2FFB),
+    # then by length (more informative)
+    def score(p: str) -> tuple[int, int]:
+        op_cnt = sum(0x2FF0 <= ord(c) <= 0x2FFB for c in p)
+        return (op_cnt, len(p))
+
+    cand = max(parts, key=score) if parts else s
+
+    # drop any remaining carets
+    cand = cand.replace("^", "")
+
+    # drop ASCII (your metadata tags like GHTJKPV, Z, X are ASCII)
+    cand = "".join(ch for ch in cand if ord(ch) >= 128)
+
+    return cand.strip()
 
 def main():
     parser = argparse.ArgumentParser(
@@ -289,6 +337,56 @@ def main():
     ids_data = normalize_ids_mapping(raw_ids)
     print(f"Loaded {len(ids_data)} characters with IDS decompositions (normalized)")
 
+    def fail_fast_ids_mapping(ids_data: dict[str, str]) -> None:
+    # 1) Ensure common characters exist and look sane
+    must = ["你", "好", "我", "中", "国"]
+    missing = [c for c in must if c not in ids_data]
+    if missing:
+        raise RuntimeError(f"IDS mapping missing basic chars: {missing}. Wrong IDS file or key normalization.")
+
+    for c in must:
+        v = ids_data[c]
+        if "^" in v or "$(" in v or "{" in v:
+            raise RuntimeError(f"IDS for {c} still contains metadata after sanitization: {repr(v)}")
+
+    # 2) Operator presence ratio (quick proxy for parseability)
+    vals = list(ids_data.values())
+    sample = vals[:5000] if len(vals) > 5000 else vals
+    op_frac = sum(any(0x2FF0 <= ord(ch) <= 0x2FFB for ch in s) for s in sample) / max(1, len(sample))
+
+    # If this is near 0, your IDS strings still aren't standard IDS
+    if op_frac < 0.05:
+        raise RuntimeError(f"IDS operator presence too low ({op_frac:.3f}). IDS strings likely still malformed.")
+
+    fail_fast_ids_mapping(ids_data)
+    print("[OK] IDS mapping passed fail-fast checks.")
+
+
+    def fail_fast_ids_mapping(ids_data: dict[str, str]) -> None:
+    # 1) Ensure common characters exist and look sane
+    must = ["你", "好", "我", "中", "国"]
+    missing = [c for c in must if c not in ids_data]
+    if missing:
+        raise RuntimeError(f"IDS mapping missing basic chars: {missing}. Wrong IDS file or key normalization.")
+
+    for c in must:
+        v = ids_data[c]
+        if "^" in v or "$(" in v or "{" in v:
+            raise RuntimeError(f"IDS for {c} still contains metadata after sanitization: {repr(v)}")
+
+    # 2) Operator presence ratio (quick proxy for parseability)
+    vals = list(ids_data.values())
+    sample = vals[:5000] if len(vals) > 5000 else vals
+    op_frac = sum(any(0x2FF0 <= ord(ch) <= 0x2FFB for ch in s) for s in sample) / max(1, len(sample))
+
+    # If this is near 0, your IDS strings still aren't standard IDS
+    if op_frac < 0.05:
+        raise RuntimeError(f"IDS operator presence too low ({op_frac:.3f}). IDS strings likely still malformed.")
+
+fail_fast_ids_mapping(ids_data)
+print("[OK] IDS mapping passed fail-fast checks.")
+
+
     # ===== FAIL FAST checks =====
     for ch in ["你", "好", "我", "中", "国"]:
         if ch in ids_data:
@@ -306,6 +404,27 @@ def main():
 
     # Create parser
     parser_instance = IDSParser(ids_data=ids_data, max_depth=args.max_depth)
+    def fail_fast_parser(parser_instance: IDSParser) -> None:
+    tests = ["你", "好", "我", "中", "国"]
+    bad = []
+    for ch in tests:
+        try:
+            t = parser_instance.parse(ch) if hasattr(parser_instance, "parse") else None
+            # These fields match your earlier debug output
+            if (t is None) or (getattr(t, "depth", 0) == 0) or (getattr(t, "operator", None) is None):
+                bad.append((ch, t))
+        except Exception as e:
+            bad.append((ch, f"EXC: {e}"))
+
+    if bad:
+        msg = "\n".join([f"  {c}: {repr(t)[:160]}" for c, t in bad])
+        raise RuntimeError("IDSParser sanity check failed (still producing leaf trees). Examples:\n" + msg)
+
+    fail_fast_parser(parser_instance)
+    print("[OK] IDSParser passed fail-fast checks.")
+
+
+
 
     # Collect target characters
     target_chars: Set[str] = set()
@@ -576,5 +695,3 @@ def main():
     print("\nDone!")
 
 
-if __name__ == '__main__':
-    main()
