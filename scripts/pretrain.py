@@ -105,16 +105,21 @@ def main():
     logger.info(f"Loaded vocabulary with {cnm_vocab.component_vocab_size} components")
 
     # Load tokenizer
-    logger.info(f"Loading tokenizer from {args.pretrained_bert}")
-    base_tokenizer = BertTokenizerFast.from_pretrained(args.pretrained_bert)
+    # Load tokenizer (CNMTokenizer must be initialized with a real vocab/tokenizer file)
+    logger.info(f"Loading CNM tokenizer from {args.pretrained_bert}")
 
-    # Create CNM tokenizer
-    tokenizer = CNMTokenizer(
-        vocab_file=None,
-        cnm_vocab=cnm_vocab,
+    tokenizer = CNMTokenizer.from_pretrained(
+        args.pretrained_bert,
+        cnm_vocab=cnm_vocab,          # keep your custom field
     )
-    tokenizer._tokenizer = base_tokenizer._tokenizer
+
+# Optional but recommended: validate we have a backend tokenizer
+    if getattr(tokenizer, "_tokenizer", None) is None:
+        raise RuntimeError("CNMTokenizer has no backend fast tokenizer (_tokenizer is None).")
+
     tokenizer._build_token_char_map()
+    logger.info("CNMTokenizer initialized successfully.")
+
 
     # Create model config
     model_config = config_dict.get('model', {})
