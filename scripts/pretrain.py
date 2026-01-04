@@ -390,7 +390,7 @@ def main():
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
-        num_proc=args.dataloader_num_workers if local_rank == -1 else 1,
+        num_proc=1,
         remove_columns=dataset.column_names,
         desc="Tokenizing",
     )
@@ -401,7 +401,7 @@ def main():
         val_tokenized = val_dataset.map(
             tokenize_function,
             batched=True,
-            num_proc=args.dataloader_num_workers if local_rank == -1 else 1,
+            num_proc=1,
             remove_columns=val_dataset.column_names,
         )
     else:
