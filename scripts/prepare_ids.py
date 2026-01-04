@@ -360,6 +360,9 @@ def main():
 
         fail_fast_ids_mapping(ids_data)
         print("[OK] IDS mapping passed fail-fast checks.")
+
+    parser_instance = IDSParser(ids_data=ids_data, max_depth=args.max_depth)
+
     def fail_fast_parser(parser_instance: IDSParser) -> None:
         tests = ["你", "好", "我", "中", "国"]
         bad = []
