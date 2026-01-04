@@ -32,7 +32,7 @@ import yaml
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from datasets import load_dataset
+from datasets import load_dataset, Features, Value
 from transformers import (
     BertModel,
     set_seed,
@@ -224,6 +224,9 @@ def main():
         logger.info(f"Loading training data from {args.train_file}")
     train_path = Path(args.train_file)
 
+    # Define features to only load 'text' column (handles inconsistent schemas across files)
+    text_features = Features({'text': Value('string')})
+
     if train_path.is_dir():
         # Load from directory of JSONL files
         data_files = list(train_path.glob('**/*.jsonl'))
@@ -231,9 +234,19 @@ def main():
             raise ValueError(f"No JSONL files found in {train_path}")
         if is_main_process:
             logger.info(f"Found {len(data_files)} JSONL files")
-        dataset = load_dataset('json', data_files=[str(f) for f in data_files], split='train')
+        dataset = load_dataset(
+            'json',
+            data_files=[str(f) for f in data_files],
+            split='train',
+            features=text_features,
+        )
     else:
-        dataset = load_dataset('json', data_files=str(train_path), split='train')
+        dataset = load_dataset(
+            'json',
+            data_files=str(train_path),
+            split='train',
+            features=text_features,
+        )
 
     if is_main_process:
         logger.info(f"Loaded {len(dataset)} training examples")
