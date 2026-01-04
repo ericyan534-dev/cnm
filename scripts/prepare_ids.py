@@ -75,7 +75,10 @@ def sanitize_ids_string(raw: str) -> str:
 def normalize_ids_mapping(raw) -> dict:
     """
     Convert many IDS JSON formats into:
-        { "<single_char>": "<ids_string_without_spaces>" }
+        { "<single_char>": ["<ids_string1>", "<ids_string2>", ...] }
+
+    IMPORTANT: Returns List[str] per character to preserve ALL alternatives.
+    IDSParser will try each alternative and use the first one that parses successfully.
 
     Handles keys:
       - actual char keys: "你"
@@ -117,54 +120,55 @@ def normalize_ids_mapping(raw) -> dict:
 
         return None
 
-    def val_to_ids(v) -> Optional[str]:
+    def val_to_ids_list(v) -> List[str]:
+        """Convert value to list of cleaned IDS strings, keeping ALL alternatives."""
+        results = []
+
         if isinstance(v, str):
-            s = v
+            # Single string
+            s = unicodedata.normalize("NFKC", v)
+            s = _IDS_WS.sub("", s)
+            s = sanitize_ids_string(s)
+            if s:
+                results.append(s)
         elif isinstance(v, dict):
-            # common field names
+            # Dict with ids field
             for field in ("ids", "decomp", "decomposition", "ids_str", "value"):
                 if field in v and isinstance(v[field], str):
-                    s = v[field]
+                    s = unicodedata.normalize("NFKC", v[field])
+                    s = _IDS_WS.sub("", s)
+                    s = sanitize_ids_string(s)
+                    if s:
+                        results.append(s)
                     break
-            else:
-                return None
         elif isinstance(v, list):
-            # Could be list of alternative IDS strings or tokenized IDS
             if len(v) == 0:
-                return None
+                return []
             if all(isinstance(t, str) for t in v):
                 # Check if it's alternatives (each is an IDS) or tokens
                 if any(len(t) > 1 for t in v):
-                    # Likely alternatives, pick the first valid one
+                    # Likely alternatives - keep ALL of them
                     for alt in v:
                         cleaned = sanitize_ids_string(alt)
-                        if cleaned:
-                            s = cleaned
-                            break
-                    else:
-                        return None
+                        if cleaned and cleaned not in results:
+                            results.append(cleaned)
                 else:
                     # Single-char tokens, join them
                     s = "".join(v)
-            else:
-                return None
-        else:
-            return None
+                    s = sanitize_ids_string(s)
+                    if s:
+                        results.append(s)
 
-        # Normalize + strip whitespace
-        s = unicodedata.normalize("NFKC", s)
-        s = _IDS_WS.sub("", s)
-        s = sanitize_ids_string(s)
-        return s if s else None
+        return results
 
     out: dict = {}
 
     if isinstance(raw, dict):
         for k, v in raw.items():
             ch = key_to_char(k)
-            ids = val_to_ids(v)
-            if ch is not None and ids is not None:
-                out[ch] = ids
+            ids_list = val_to_ids_list(v)
+            if ch is not None and ids_list:
+                out[ch] = ids_list
         return out
 
     if isinstance(raw, list):
@@ -179,7 +183,11 @@ def normalize_ids_mapping(raw) -> dict:
                 s = _IDS_WS.sub("", s)
                 s = sanitize_ids_string(s)
                 if s:
-                    out[ch.strip()] = s
+                    ch = ch.strip()
+                    if ch not in out:
+                        out[ch] = []
+                    if s not in out[ch]:
+                        out[ch].append(s)
         return out
 
     raise TypeError(f"Unsupported IDS JSON top-level type: {type(raw)}")
@@ -231,6 +239,8 @@ def fail_fast_ids_mapping(ids_data: dict) -> None:
     """
     Validate IDS mapping before proceeding with parsing.
     Raises RuntimeError if validation fails.
+
+    Note: ids_data values are now List[str] (list of alternatives per character).
     """
     # 1) Ensure common characters exist and look sane
     must = ["你", "好", "我", "中", "国"]
@@ -239,13 +249,19 @@ def fail_fast_ids_mapping(ids_data: dict) -> None:
         raise RuntimeError(f"IDS mapping missing basic chars: {missing}. Wrong IDS file or key normalization.")
 
     for c in must:
-        v = ids_data[c]
-        if "^" in v or "$(" in v or "{" in v:
-            raise RuntimeError(f"IDS for {c} still contains metadata after sanitization: {repr(v)}")
+        ids_list = ids_data[c]
+        if not isinstance(ids_list, list) or len(ids_list) == 0:
+            raise RuntimeError(f"IDS for {c} is not a valid list: {repr(ids_list)}")
+        for v in ids_list:
+            if "^" in v or "$(" in v or "{" in v:
+                raise RuntimeError(f"IDS for {c} still contains metadata after sanitization: {repr(v)}")
 
     # 2) Operator presence ratio (quick proxy for parseability)
-    vals = list(ids_data.values())
-    sample = vals[:5000] if len(vals) > 5000 else vals
+    # Flatten all IDS strings from all characters
+    all_ids = []
+    for ids_list in list(ids_data.values())[:5000]:
+        all_ids.extend(ids_list)
+    sample = all_ids[:10000] if len(all_ids) > 10000 else all_ids
     op_frac = sum(any(0x2FF0 <= ord(ch) <= 0x2FFB for ch in s) for s in sample) / max(1, len(sample))
 
     # If this is near 0, your IDS strings still aren't standard IDS
