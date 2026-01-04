@@ -214,32 +214,71 @@ class CNMTokenizer(BertTokenizerFast):
         cls,
         pretrained_model_name_or_path: Union[str, Path],
         cnm_vocab_file: Optional[str] = None,
+        cnm_vocab: Optional[CNMVocab] = None,
         **kwargs,
     ) -> "CNMTokenizer":
         """
-        Load tokenizer from pretrained.
+        Load tokenizer from pretrained BERT or local path.
 
         Args:
-            pretrained_model_name_or_path: Model name or path
+            pretrained_model_name_or_path: HuggingFace model name (e.g., 'bert-base-chinese')
+                                           or local path to saved tokenizer
             cnm_vocab_file: Path to CNM vocabulary (auto-detected if not provided)
-            **kwargs: Additional arguments
+            cnm_vocab: Pre-loaded CNMVocab instance
+            **kwargs: Additional arguments for BertTokenizerFast
 
         Returns:
             CNMTokenizer instance
         """
         path = Path(pretrained_model_name_or_path)
 
-        # Auto-detect CNM vocab
-        if cnm_vocab_file is None and path.is_dir():
+        # Auto-detect CNM vocab from local path
+        if cnm_vocab is None and cnm_vocab_file is None and path.is_dir():
             potential_path = path / 'cnm_vocab.json'
             if potential_path.exists():
                 cnm_vocab_file = str(potential_path)
 
-        return cls(
-            vocab_file=str(path / 'vocab.txt') if path.is_dir() else None,
-            cnm_vocab_file=cnm_vocab_file,
-            **kwargs,
-        )
+        # Check if it's a local directory with vocab.txt
+        if path.is_dir() and (path / 'vocab.txt').exists():
+            # Local path - use vocab_file directly
+            tokenizer = cls(
+                vocab_file=str(path / 'vocab.txt'),
+                cnm_vocab=cnm_vocab,
+                cnm_vocab_file=cnm_vocab_file,
+                **kwargs,
+            )
+        else:
+            # HuggingFace model name or path without vocab.txt
+            # Load base tokenizer from HuggingFace and copy its backend
+            base_tokenizer = BertTokenizerFast.from_pretrained(
+                str(pretrained_model_name_or_path), **kwargs
+            )
+
+            # Create CNM tokenizer and copy the backend
+            tokenizer = cls.__new__(cls)
+            tokenizer._tokenizer = base_tokenizer._tokenizer
+
+            # Load CNM vocab
+            if cnm_vocab is not None:
+                tokenizer.cnm_vocab = cnm_vocab
+            elif cnm_vocab_file is not None:
+                tokenizer.cnm_vocab = CNMVocab.load(Path(cnm_vocab_file))
+            else:
+                tokenizer.cnm_vocab = None
+
+            # Copy essential attributes from base tokenizer
+            tokenizer._bos_token = base_tokenizer._bos_token
+            tokenizer._eos_token = base_tokenizer._eos_token
+            tokenizer._unk_token = base_tokenizer._unk_token
+            tokenizer._sep_token = base_tokenizer._sep_token
+            tokenizer._pad_token = base_tokenizer._pad_token
+            tokenizer._cls_token = base_tokenizer._cls_token
+            tokenizer._mask_token = base_tokenizer._mask_token
+
+            # Build token-char mapping
+            tokenizer._build_token_char_map()
+
+        return tokenizer
 
 
 def create_cnm_tokenizer(

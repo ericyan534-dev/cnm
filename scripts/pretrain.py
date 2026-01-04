@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-Pretrain CNM-BERT on Chinese corpus with MLM + auxiliary objectives.
+Pretrain CNM-BERT on Chinese corpus with MLM (Whole Word Masking) + auxiliary objectives.
+
+This script implements the CNM-BERT pretraining as described in the paper:
+- Masked Language Modeling with Whole Word Masking (WWM) for Chinese
+- Auxiliary component prediction loss for structural retention
 
 Usage:
+    # Single GPU
     python scripts/pretrain.py \
         --train_file data/corpus \
-        --output_dir outputs/pretrain \
-        --config configs/pretrain.yaml
+        --cnm_vocab_path data/ids/cnm_vocab.json \
+        --output_dir outputs/pretrain
+
+    # Multi-GPU with torchrun
+    torchrun --nproc_per_node=8 scripts/pretrain.py \
+        --train_file data/corpus \
+        --cnm_vocab_path data/ids/cnm_vocab.json \
+        --output_dir outputs/pretrain
 """
 
 import argparse
@@ -23,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from datasets import load_dataset
 from transformers import (
-    BertTokenizerFast,
+    BertModel,
     set_seed,
 )
 
@@ -45,81 +56,126 @@ logger = logging.getLogger(__name__)
 
 def load_config(config_path: Path) -> dict:
     """Load configuration from YAML file."""
+    if not config_path.exists():
+        return {}
     with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Pretrain CNM-BERT')
+    parser = argparse.ArgumentParser(description='Pretrain CNM-BERT with MLM + WWM')
 
     # Data arguments
     parser.add_argument('--train_file', type=str, required=True,
-                       help='Training data file or directory')
+                       help='Training data file or directory containing JSONL files')
     parser.add_argument('--validation_file', type=str,
-                       help='Validation data file')
+                       help='Validation data file (optional, will split from train if not provided)')
     parser.add_argument('--cnm_vocab_path', type=str, default='data/ids/cnm_vocab.json',
-                       help='Path to CNM vocabulary')
-    parser.add_argument('--ids_cache_path', type=str, default='data/ids/ids_cache.json',
-                       help='Path to IDS parse cache')
+                       help='Path to CNM vocabulary JSON file')
 
     # Model arguments
     parser.add_argument('--config', type=str, default='configs/pretrain.yaml',
                        help='Path to config YAML file')
     parser.add_argument('--pretrained_bert', type=str, default='bert-base-chinese',
-                       help='Pretrained BERT model to initialize from')
+                       help='Pretrained BERT model to initialize from (HuggingFace name or path)')
 
     # Training arguments
     parser.add_argument('--output_dir', type=str, default='outputs/pretrain',
-                       help='Output directory')
+                       help='Output directory for checkpoints and final model')
     parser.add_argument('--num_train_epochs', type=int, default=3,
                        help='Number of training epochs')
     parser.add_argument('--per_device_train_batch_size', type=int, default=32,
-                       help='Batch size per device')
+                       help='Training batch size per device')
+    parser.add_argument('--per_device_eval_batch_size', type=int, default=64,
+                       help='Evaluation batch size per device')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=8,
+                       help='Gradient accumulation steps')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
-                       help='Learning rate')
+                       help='Peak learning rate')
+    parser.add_argument('--warmup_ratio', type=float, default=0.1,
+                       help='Warmup ratio')
+    parser.add_argument('--weight_decay', type=float, default=0.01,
+                       help='Weight decay')
+    parser.add_argument('--max_seq_length', type=int, default=512,
+                       help='Maximum sequence length')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
 
+    # MLM arguments
+    parser.add_argument('--mlm_probability', type=float, default=0.15,
+                       help='Probability of masking tokens')
+    parser.add_argument('--wwm', action='store_true', default=True,
+                       help='Use Whole Word Masking (default: True)')
+    parser.add_argument('--no_wwm', action='store_true',
+                       help='Disable Whole Word Masking')
+
+    # Auxiliary loss
+    parser.add_argument('--aux_loss_weight', type=float, default=0.1,
+                       help='Weight for auxiliary component prediction loss')
+
     # Performance arguments
     parser.add_argument('--fp16', action='store_true',
-                       help='Use mixed precision training')
+                       help='Use mixed precision training (FP16)')
+    parser.add_argument('--bf16', action='store_true',
+                       help='Use mixed precision training (BF16)')
     parser.add_argument('--gradient_checkpointing', action='store_true',
-                       help='Use gradient checkpointing')
+                       help='Use gradient checkpointing to save memory')
     parser.add_argument('--dataloader_num_workers', type=int, default=4,
                        help='Number of dataloader workers')
 
+    # Logging arguments
+    parser.add_argument('--logging_steps', type=int, default=100,
+                       help='Log every N steps')
+    parser.add_argument('--save_steps', type=int, default=1000,
+                       help='Save checkpoint every N steps')
+    parser.add_argument('--eval_steps', type=int, default=1000,
+                       help='Evaluate every N steps')
+    parser.add_argument('--save_total_limit', type=int, default=3,
+                       help='Maximum number of checkpoints to keep')
+    parser.add_argument('--report_to', type=str, default='wandb',
+                       choices=['wandb', 'tensorboard', 'none'],
+                       help='Where to report metrics')
+    parser.add_argument('--run_name', type=str, default='cnm-bert-pretrain',
+                       help='Run name for logging')
+
+    # Resume training
+    parser.add_argument('--resume_from_checkpoint', type=str,
+                       help='Path to checkpoint to resume from')
+
     args = parser.parse_args()
 
-    # Load config if provided
-    config_dict = {}
-    if args.config and Path(args.config).exists():
-        config_dict = load_config(Path(args.config))
-        logger.info(f"Loaded config from {args.config}")
+    # Handle WWM flag
+    if args.no_wwm:
+        args.wwm = False
 
-    # Set seed
+    # Load config if provided
+    config_dict = load_config(Path(args.config))
+    logger.info(f"Loaded config from {args.config}" if config_dict else "Using default config")
+
+    # Set seed for reproducibility
     set_seed(args.seed)
 
+    # Determine local rank for distributed training
+    local_rank = int(os.environ.get('LOCAL_RANK', -1))
+    is_main_process = local_rank in [-1, 0]
+
     # Load CNM vocabulary
-    logger.info(f"Loading CNM vocabulary from {args.cnm_vocab_path}")
+    if is_main_process:
+        logger.info(f"Loading CNM vocabulary from {args.cnm_vocab_path}")
     cnm_vocab = CNMVocab.load(Path(args.cnm_vocab_path))
-    logger.info(f"Loaded vocabulary with {cnm_vocab.component_vocab_size} components")
+    if is_main_process:
+        logger.info(f"Loaded vocabulary with {cnm_vocab.component_vocab_size} components, "
+                   f"{cnm_vocab.operator_vocab_size} operators")
 
-    # Load tokenizer
-    # Load tokenizer (CNMTokenizer must be initialized with a real vocab/tokenizer file)
-    logger.info(f"Loading CNM tokenizer from {args.pretrained_bert}")
-
+    # Load tokenizer using the fixed from_pretrained method
+    if is_main_process:
+        logger.info(f"Loading tokenizer from {args.pretrained_bert}")
     tokenizer = CNMTokenizer.from_pretrained(
         args.pretrained_bert,
-        cnm_vocab=cnm_vocab,          # keep your custom field
+        cnm_vocab=cnm_vocab,
     )
-
-# Optional but recommended: validate we have a backend tokenizer
-    if getattr(tokenizer, "_tokenizer", None) is None:
-        raise RuntimeError("CNMTokenizer has no backend fast tokenizer (_tokenizer is None).")
-
-    tokenizer._build_token_char_map()
-    logger.info("CNMTokenizer initialized successfully.")
-
+    if is_main_process:
+        logger.info(f"Tokenizer vocabulary size: {len(tokenizer)}")
 
     # Create model config
     model_config = config_dict.get('model', {})
@@ -134,26 +190,38 @@ def main():
         max_tree_depth=model_config.get('max_tree_depth', 6),
         component_vocab_size=cnm_vocab.component_vocab_size,
         operator_vocab_size=cnm_vocab.operator_vocab_size,
-        aux_loss_weight=model_config.get('aux_loss_weight', 0.1),
+        aux_loss_weight=args.aux_loss_weight,
     )
 
     # Create model
-    logger.info("Creating CNM-BERT model...")
+    if is_main_process:
+        logger.info("Creating CNM-BERT model...")
     model = CNMBertForPreTraining(cnm_config)
 
     # Load pretrained BERT weights
     if args.pretrained_bert:
-        logger.info(f"Loading pretrained weights from {args.pretrained_bert}")
-        model.bert._load_bert_weights(
-            __import__('transformers').BertModel.from_pretrained(args.pretrained_bert)
-        )
+        if is_main_process:
+            logger.info(f"Loading pretrained weights from {args.pretrained_bert}")
+        bert = BertModel.from_pretrained(args.pretrained_bert)
+        model.bert._load_bert_weights(bert)
+        del bert  # Free memory
 
     # Enable gradient checkpointing if requested
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
+        if is_main_process:
+            logger.info("Gradient checkpointing enabled")
+
+    # Log model parameters
+    if is_main_process:
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
 
     # Load dataset
-    logger.info(f"Loading training data from {args.train_file}")
+    if is_main_process:
+        logger.info(f"Loading training data from {args.train_file}")
     train_path = Path(args.train_file)
 
     if train_path.is_dir():
@@ -161,27 +229,31 @@ def main():
         data_files = list(train_path.glob('**/*.jsonl'))
         if not data_files:
             raise ValueError(f"No JSONL files found in {train_path}")
+        if is_main_process:
+            logger.info(f"Found {len(data_files)} JSONL files")
         dataset = load_dataset('json', data_files=[str(f) for f in data_files], split='train')
     else:
         dataset = load_dataset('json', data_files=str(train_path), split='train')
 
-    logger.info(f"Loaded {len(dataset)} training examples")
+    if is_main_process:
+        logger.info(f"Loaded {len(dataset)} training examples")
 
     # Tokenize dataset
     def tokenize_function(examples):
         return tokenizer(
             examples['text'],
             truncation=True,
-            max_length=512,
+            max_length=args.max_seq_length,
             return_special_tokens_mask=True,
         )
 
-    logger.info("Tokenizing dataset...")
+    if is_main_process:
+        logger.info("Tokenizing dataset...")
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
-        num_proc=args.dataloader_num_workers,
-        remove_columns=['text'],
+        num_proc=args.dataloader_num_workers if local_rank == -1 else 1,
+        remove_columns=dataset.column_names,
         desc="Tokenizing",
     )
 
@@ -191,44 +263,53 @@ def main():
         val_tokenized = val_dataset.map(
             tokenize_function,
             batched=True,
-            num_proc=args.dataloader_num_workers,
-            remove_columns=['text'],
+            num_proc=args.dataloader_num_workers if local_rank == -1 else 1,
+            remove_columns=val_dataset.column_names,
         )
     else:
-        split = tokenized_dataset.train_test_split(test_size=0.05, seed=args.seed)
+        split = tokenized_dataset.train_test_split(test_size=0.01, seed=args.seed)
         tokenized_dataset = split['train']
         val_tokenized = split['test']
-        logger.info(f"Split: {len(tokenized_dataset)} train, {len(val_tokenized)} validation")
+        if is_main_process:
+            logger.info(f"Split: {len(tokenized_dataset)} train, {len(val_tokenized)} validation")
 
-    # Create data collator
+    # Create data collator with WWM
+    if is_main_process:
+        logger.info(f"Creating data collator (WWM={'enabled' if args.wwm else 'disabled'}, "
+                   f"MLM prob={args.mlm_probability})")
     data_collator = CNMDataCollatorForPreTraining(
         tokenizer=tokenizer,
         cnm_vocab=cnm_vocab,
-        mlm_probability=config_dict.get('training', {}).get('mlm_probability', 0.15),
-        wwm=config_dict.get('training', {}).get('wwm', True),
+        mlm_probability=args.mlm_probability,
+        wwm=args.wwm,
+        max_length=args.max_seq_length,
     )
 
     # Training arguments
-    training_config = config_dict.get('training', {})
     training_args = CNMPretrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=training_config.get('per_device_eval_batch_size', 64),
-        gradient_accumulation_steps=training_config.get('gradient_accumulation_steps', 8),
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
-        weight_decay=training_config.get('weight_decay', 0.01),
-        warmup_ratio=training_config.get('warmup_ratio', 0.1),
+        weight_decay=args.weight_decay,
+        warmup_ratio=args.warmup_ratio,
         fp16=args.fp16,
-        logging_steps=training_config.get('logging_steps', 100),
-        save_steps=training_config.get('save_steps', 1000),
-        eval_steps=training_config.get('eval_steps', 1000),
+        bf16=args.bf16,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
         evaluation_strategy="steps",
-        save_total_limit=training_config.get('save_total_limit', 3),
+        save_total_limit=args.save_total_limit,
         load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         dataloader_num_workers=args.dataloader_num_workers,
-        report_to=training_config.get('report_to', 'wandb'),
-        run_name=training_config.get('run_name', 'cnm-bert-pretrain'),
+        report_to=args.report_to if args.report_to != 'none' else [],
+        run_name=args.run_name,
+        ddp_find_unused_parameters=False,
+        dataloader_pin_memory=True,
     )
 
     # Create trainer
@@ -243,15 +324,28 @@ def main():
     )
 
     # Train
-    logger.info("Starting training...")
-    trainer.train()
+    if is_main_process:
+        logger.info("=" * 50)
+        logger.info("Starting CNM-BERT Pretraining")
+        logger.info("=" * 50)
+        logger.info(f"  MLM Probability: {args.mlm_probability}")
+        logger.info(f"  Whole Word Masking: {args.wwm}")
+        logger.info(f"  Auxiliary Loss Weight: {args.aux_loss_weight}")
+        logger.info(f"  Batch Size: {args.per_device_train_batch_size} x {args.gradient_accumulation_steps}")
+        logger.info(f"  Learning Rate: {args.learning_rate}")
+        logger.info(f"  Epochs: {args.num_train_epochs}")
+        logger.info("=" * 50)
+
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     # Save final model
-    logger.info(f"Saving model to {args.output_dir}")
+    if is_main_process:
+        logger.info(f"Saving final model to {args.output_dir}")
     trainer.save_model()
     tokenizer.save_pretrained(args.output_dir)
 
-    logger.info("Done!")
+    if is_main_process:
+        logger.info("Pretraining complete!")
 
 
 if __name__ == '__main__':
