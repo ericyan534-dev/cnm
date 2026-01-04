@@ -96,6 +96,12 @@ class CNMTokenizer(BertTokenizerFast):
         Returns:
             BatchEncoding with input_ids, attention_mask, and optionally struct_ids
         """
+        # --- FIX: Some bad init paths (e.g. __new__ hacks) miss this HF internal flag.
+        # Newer Transformers expects it in PreTrainedTokenizerBase.__call__.
+        if not hasattr(self, "_in_target_context_manager"):
+            self._in_target_context_manager = False
+        # --- END FIX
+
         # Standard tokenization
         encoding = super().__call__(text, **kwargs)
 
@@ -238,45 +244,28 @@ class CNMTokenizer(BertTokenizerFast):
             if potential_path.exists():
                 cnm_vocab_file = str(potential_path)
 
-        # Check if it's a local directory with vocab.txt
-        if path.is_dir() and (path / 'vocab.txt').exists():
-            # Local path - use vocab_file directly
-            tokenizer = cls(
-                vocab_file=str(path / 'vocab.txt'),
-                cnm_vocab=cnm_vocab,
-                cnm_vocab_file=cnm_vocab_file,
-                **kwargs,
-            )
+        # --- FIX: Let HF build a fully initialized tokenizer instance.
+        # Do NOT use cls.__new__ + copying _tokenizer, which skips base init and breaks internal state.
+        tokenizer: CNMTokenizer = super(CNMTokenizer, cls).from_pretrained(
+            str(pretrained_model_name_or_path),
+            **kwargs,
+        )
+        # --- END FIX
+
+        # Attach CNM vocab
+        if cnm_vocab is not None:
+            tokenizer.cnm_vocab = cnm_vocab
+        elif cnm_vocab_file is not None:
+            tokenizer.cnm_vocab = CNMVocab.load(Path(cnm_vocab_file))
         else:
-            # HuggingFace model name or path without vocab.txt
-            # Load base tokenizer from HuggingFace and copy its backend
-            base_tokenizer = BertTokenizerFast.from_pretrained(
-                str(pretrained_model_name_or_path), **kwargs
-            )
+            tokenizer.cnm_vocab = None
 
-            # Create CNM tokenizer and copy the backend
-            tokenizer = cls.__new__(cls)
-            tokenizer._tokenizer = base_tokenizer._tokenizer
+        # Rebuild token-char map (depends on vocab)
+        tokenizer._build_token_char_map()
 
-            # Load CNM vocab
-            if cnm_vocab is not None:
-                tokenizer.cnm_vocab = cnm_vocab
-            elif cnm_vocab_file is not None:
-                tokenizer.cnm_vocab = CNMVocab.load(Path(cnm_vocab_file))
-            else:
-                tokenizer.cnm_vocab = None
-
-            # Copy essential attributes from base tokenizer
-            tokenizer._bos_token = base_tokenizer._bos_token
-            tokenizer._eos_token = base_tokenizer._eos_token
-            tokenizer._unk_token = base_tokenizer._unk_token
-            tokenizer._sep_token = base_tokenizer._sep_token
-            tokenizer._pad_token = base_tokenizer._pad_token
-            tokenizer._cls_token = base_tokenizer._cls_token
-            tokenizer._mask_token = base_tokenizer._mask_token
-
-            # Build token-char mapping
-            tokenizer._build_token_char_map()
+        # Ensure HF internal flag exists (extra safety)
+        if not hasattr(tokenizer, "_in_target_context_manager"):
+            tokenizer._in_target_context_manager = False
 
         return tokenizer
 
@@ -295,19 +284,4 @@ def create_cnm_tokenizer(
     Returns:
         CNMTokenizer instance
     """
-    # Load base tokenizer
-    base_tokenizer = BertTokenizerFast.from_pretrained(bert_tokenizer_name)
-
-    # Create CNM tokenizer with same vocab
-    tokenizer = CNMTokenizer(
-        vocab_file=None,
-        cnm_vocab=cnm_vocab,
-    )
-
-    # Copy vocab from base tokenizer
-    tokenizer._tokenizer = base_tokenizer._tokenizer
-
-    # Rebuild token-char map
-    tokenizer._build_token_char_map()
-
-    return tokenizer
+    return CNMTokenizer.from_pretrained(bert_tokenizer_name, cnm_vocab=cnm_vocab)
