@@ -45,6 +45,54 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from cnm.data.ids_parser import IDSParser, estimate_ids_coverage
 from cnm.data.vocab import CNMVocab, extract_corpus_chars
 
+def normalize_ids_data(raw) -> dict:
+    """
+    Normalize various IDS JSON formats into:
+        { "<char>": "<ids_string>" }
+
+    Supported inputs:
+      - dict: {char: "⿰亻尔"}
+      - dict: {char: {"ids": "⿰亻尔", ...}}
+      - dict: {char: ["⿰","亻","尔"]}  (tokens list)
+      - list: [{"char": "你", "ids": "⿰亻尔"}, ...]
+      - list: [{"character": "你", "ids": "⿰亻尔"}, ...]
+    """
+    if isinstance(raw, dict):
+        # Detect value type
+        if not raw:
+            return {}
+        v0 = next(iter(raw.values()))
+        if isinstance(v0, str):
+            return raw
+        if isinstance(v0, dict):
+            # Common: {char: {"ids": "..."}}
+            out = {}
+            for ch, obj in raw.items():
+                if isinstance(obj, dict) and "ids" in obj and isinstance(obj["ids"], str):
+                    out[ch] = obj["ids"]
+            return out
+        if isinstance(v0, list):
+            # Common: {char: ["⿰","亻","尔"]}
+            out = {}
+            for ch, toks in raw.items():
+                if isinstance(toks, list) and all(isinstance(t, str) for t in toks):
+                    out[ch] = "".join(toks)
+            return out
+        raise TypeError(f"Unsupported dict value type: {type(v0)}")
+
+    if isinstance(raw, list):
+        out = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            ch = item.get("char") or item.get("character") or item.get("ch")
+            ids = item.get("ids") or item.get("decomp") or item.get("decomposition")
+            if isinstance(ch, str) and len(ch) == 1 and isinstance(ids, str) and ids:
+                out[ch] = ids
+        return out
+
+    raise TypeError(f"Unsupported IDS JSON top-level type: {type(raw)}")
+
 
 def load_corpus_chars(corpus_dir: Path) -> Set[str]:
     """Load unique characters from corpus files."""
@@ -140,8 +188,10 @@ def main():
         sys.exit(1)
 
     with open(args.ids_file, 'r', encoding='utf-8') as f:
-        ids_data = json.load(f)
-    print(f"Loaded {len(ids_data)} characters with IDS decompositions")
+        raw_ids = json.load(f)
+        ids_data = normalize_ids_data(raw_ids)
+    print(f"Loaded {len(ids_data)} characters with IDS decompositions (normalized)")
+
 
     # Create parser
     parser_instance = IDSParser(ids_data=ids_data, max_depth=args.max_depth)
