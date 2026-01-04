@@ -306,7 +306,7 @@ def main():
             ds_part = ds_part.map(
                 _to_text,
                 batched=True,
-                num_proc=args.dataloader_num_workers if local_rank == -1 else 1,
+                num_proc=1,
                 desc="Normalizing text fields",
             )
             drop_cols = [c for c in ds_part.column_names if c != "text"]
@@ -359,7 +359,7 @@ def main():
         dataset = dataset.map(
             _to_text,
             batched=True,
-            num_proc=args.dataloader_num_workers if local_rank == -1 else 1,
+            num_proc=1,
             desc="Normalizing text fields",
         )
         
