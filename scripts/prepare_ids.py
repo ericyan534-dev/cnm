@@ -135,6 +135,102 @@ def load_bert_vocab_chars(vocab_file: Path) -> Set[str]:
 
     return chars
 
+import unicodedata
+import re
+
+_IDS_WS = re.compile(r"\s+")
+
+def normalize_ids_mapping(raw) -> dict[str, str]:
+    """
+    Convert many IDS JSON formats into:
+        { "<single_char>": "<ids_string_without_spaces>" }
+
+    Handles keys:
+      - actual char keys: "你"
+      - integer codepoints: 20320
+      - hex strings: "4F60"
+      - "U+4F60" / "u+4f60"
+    Handles values:
+      - string IDS: "⿰亻尔"
+      - dict with ids field: {"ids": "⿰亻尔", ...}
+      - list tokens: ["⿰", "亻", "尔"]
+    """
+    def key_to_char(k) -> str | None:
+        # Already a single char
+        if isinstance(k, str):
+            ks = k.strip()
+            if len(ks) == 1:
+                return ks
+            # U+XXXX
+            if ks.upper().startswith("U+"):
+                try:
+                    return chr(int(ks[2:], 16))
+                except Exception:
+                    return None
+            # plain hex like "4F60"
+            if all(c in "0123456789abcdefABCDEF" for c in ks) and 2 <= len(ks) <= 6:
+                try:
+                    return chr(int(ks, 16))
+                except Exception:
+                    return None
+            return None
+
+        # int codepoint
+        if isinstance(k, int):
+            try:
+                return chr(k)
+            except Exception:
+                return None
+
+        return None
+
+    def val_to_ids(v) -> str | None:
+        if isinstance(v, str):
+            s = v
+        elif isinstance(v, dict):
+            # common field names
+            for field in ("ids", "decomp", "decomposition", "ids_str", "value"):
+                if field in v and isinstance(v[field], str):
+                    s = v[field]
+                    break
+            else:
+                return None
+        elif isinstance(v, list) and all(isinstance(t, str) for t in v):
+            s = "".join(v)
+        else:
+            return None
+
+        # Normalize + strip whitespace
+        s = unicodedata.normalize("NFKC", s)
+        s = _IDS_WS.sub("", s)
+
+        # Some files use ASCII placeholders; keep as-is for debug but avoid empty
+        return s if s else None
+
+    out: dict[str, str] = {}
+
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            ch = key_to_char(k)
+            ids = val_to_ids(v)
+            if ch is not None and ids is not None:
+                out[ch] = ids
+        return out
+
+    if isinstance(raw, list):
+        # list of records: {"char": "...", "ids": "..."}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            ch = item.get("char") or item.get("character") or item.get("ch")
+            ids = item.get("ids") or item.get("decomp") or item.get("decomposition")
+            if isinstance(ch, str) and len(ch.strip()) == 1 and isinstance(ids, str):
+                s = unicodedata.normalize("NFKC", ids)
+                s = _IDS_WS.sub("", s)
+                out[ch.strip()] = s
+        return out
+
+    raise TypeError(f"Unsupported IDS JSON top-level type: {type(raw)}")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -189,8 +285,23 @@ def main():
 
     with open(args.ids_file, 'r', encoding='utf-8') as f:
         raw_ids = json.load(f)
-        ids_data = normalize_ids_data(raw_ids)
+
+    ids_data = normalize_ids_mapping(raw_ids)
     print(f"Loaded {len(ids_data)} characters with IDS decompositions (normalized)")
+
+    # ===== FAIL FAST checks =====
+    for ch in ["你", "好", "我", "中", "国"]:
+        if ch in ids_data:
+            print(f"[DEBUG] {ch} -> {repr(ids_data[ch])[:80]}")
+        else:
+            print(f"[DEBUG] {ch} missing from normalized ids_data!")
+
+    # If none of these exist, your IDS file is not what you think it is.
+    if not any(ch in ids_data for ch in ["你", "好", "我", "中", "国"]):
+        raise RuntimeError("Normalized IDS mapping does not contain basic characters; check ids_parsed.json format/source.")
+    # ===== END FAIL FAST =====
+
+
 
 
     # Create parser
