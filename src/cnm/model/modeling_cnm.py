@@ -23,6 +23,7 @@ from transformers import BertModel, BertPreTrainedModel
 from transformers.modeling_outputs import (
     BaseModelOutputWithPoolingAndCrossAttentions,
     MaskedLMOutput,
+    ModelOutput,
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
@@ -39,8 +40,12 @@ from cnm.model.tree_mlp import TreeMLPEncoder
 
 
 @dataclass
-class CNMPreTrainingOutput:
-    """Output for CNM pretraining with MLM and auxiliary losses."""
+class CNMPreTrainingOutput(ModelOutput):
+    """
+    Output for CNM pretraining with MLM and auxiliary losses.
+
+    Inherits from ModelOutput for DataParallel/DDP compatibility.
+    """
     loss: Optional[torch.FloatTensor] = None
     mlm_loss: Optional[torch.FloatTensor] = None
     aux_loss: Optional[torch.FloatTensor] = None
