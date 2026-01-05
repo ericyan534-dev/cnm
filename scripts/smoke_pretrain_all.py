@@ -410,10 +410,9 @@ try:
 
     model = CNMBertForPreTraining(cnm_config)
 
-    # Wrap with DataParallel if multiple GPUs
-    if torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
-    model = model.cuda()
+    # NOTE: Do NOT manually wrap with DataParallel - HF Trainer handles device placement
+    # The Trainer will use DataParallel automatically when multiple GPUs are visible
+    # and no torchrun/distributed setup is detected
 
     # Load and tokenize data
     dataset = load_dataset('json', data_files="{sample_file}", split='train')
@@ -580,7 +579,7 @@ try:
         evaluation_strategy="no",
         report_to=[],
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=False,
+        ddp_find_unused_parameters=True,  # aux_head may not always receive gradients
     )
 
     trainer = CNMTrainer(

@@ -446,7 +446,7 @@ def main():
         dataloader_num_workers=args.dataloader_num_workers,
         report_to=args.report_to if args.report_to != 'none' else [],
         run_name=args.run_name,
-        ddp_find_unused_parameters=False,
+        ddp_find_unused_parameters=True,  # aux_head may not receive gradients when no CJK chars masked
         dataloader_pin_memory=True,
     )
 
