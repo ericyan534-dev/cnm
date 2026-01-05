@@ -22,6 +22,17 @@ from cnm.data.vocab import CNMVocab
 from cnm.data.tokenizer import CNMTokenizer
 
 
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    """
+    Unwrap a model from DDP/DataParallel wrappers.
+
+    Returns the underlying model for accessing attributes like .config.
+    """
+    if hasattr(model, 'module'):
+        return model.module
+    return model
+
+
 class CNMTrainer(Trainer):
     """
     Trainer for CNM-BERT with structural embedding support.
@@ -100,11 +111,13 @@ class CNMTrainer(Trainer):
                 loss = outputs.loss
             else:
                 # Compute loss manually if needed
+                # Use _unwrap_model to handle DDP/DataParallel wrappers
+                unwrapped_model = _unwrap_model(model)
                 from cnm.training.losses import CNMPretrainingLoss
                 loss_fn = CNMPretrainingLoss(
-                    vocab_size=model.config.vocab_size,
-                    component_vocab_size=model.config.component_vocab_size,
-                    aux_loss_weight=model.config.aux_loss_weight,
+                    vocab_size=unwrapped_model.config.vocab_size,
+                    component_vocab_size=unwrapped_model.config.component_vocab_size,
+                    aux_loss_weight=unwrapped_model.config.aux_loss_weight,
                 )
                 loss, mlm_loss, aux_loss = loss_fn(
                     outputs.prediction_logits if hasattr(outputs, 'prediction_logits') else outputs.logits,

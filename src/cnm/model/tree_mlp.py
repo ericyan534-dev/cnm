@@ -133,14 +133,21 @@ class TreeMLPEncoder(nn.Module):
         Returns:
             [batch_size, embed_dim] tensor of root embeddings
         """
+        # Get the device of model weights (canonical device for this replica)
+        model_device = self.component_embed.weight.device
+
         if batched_trees.num_nodes == 0:
             return torch.zeros(
                 batched_trees.batch_size,
                 self.embed_dim,
-                device=self.component_embed.weight.device,
+                device=model_device,
             )
 
-        device = batched_trees.component_ids.device
+        # CRITICAL: Move batched_trees tensors to model device to avoid device mismatch
+        # This is necessary for DataParallel where replicas run on different GPUs
+        batched_trees = batched_trees.to(model_device)
+
+        device = model_device
         num_nodes = batched_trees.num_nodes
 
         # Initialize node embeddings
